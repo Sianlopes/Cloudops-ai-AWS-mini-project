@@ -1,0 +1,38 @@
+export const defaultRules = [
+  {
+    id: "rule-availability",
+    name: "Service availability",
+    description: "Detect consecutive unsuccessful health checks",
+    metric: "failures",
+    threshold: 3,
+    unit: "consecutive failures",
+    severity: "critical",
+  },
+  {
+    id: "rule-latency",
+    name: "Response latency",
+    description: "Detect sustained slow API responses",
+    metric: "latency",
+    threshold: 800,
+    unit: "ms · 3 consecutive checks",
+    severity: "high",
+  },
+  {
+    id: "rule-auth",
+    name: "Authentication failures",
+    description: "Detect repeated failed sign-in attempts for one account",
+    metric: "authFailures",
+    threshold: 5,
+    unit: "failures / 5 minutes",
+    severity: "warning",
+  },
+  {
+    id: "rule-cpu",
+    name: "CPU utilization",
+    description: "Detect sustained high infrastructure usage",
+    metric: "cpu",
+    threshold: 80,
+    unit: "% · 5 sustained samples",
+    severity: "warning",
+  },
+];

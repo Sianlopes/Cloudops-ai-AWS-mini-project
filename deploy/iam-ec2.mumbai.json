@@ -1,0 +1,52 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": ["ssm:GetParametersByPath"],
+      "Resource": [
+        "arn:aws:ssm:ap-south-1:050649356073:parameter/cloudops/prod",
+        "arn:aws:ssm:ap-south-1:050649356073:parameter/cloudops/prod/*"
+      ]
+    },
+    {
+      "Effect": "Allow",
+      "Action": ["sqs:SendMessage"],
+      "Resource": "arn:aws:sqs:ap-south-1:050649356073:cloudops-incidents.fifo"
+    },
+    {
+      "Effect": "Allow",
+      "Action": ["sns:Publish"],
+      "Resource": "arn:aws:sns:ap-south-1:050649356073:cloudops-alerts"
+    },
+    {
+      "Effect": "Allow",
+      "Action": ["s3:PutObject"],
+      "Resource": "arn:aws:s3:::cloudops-logs-sian-2026-23/logs/*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": ["cloudwatch:GetMetricStatistics"],
+      "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": ["logs:CreateLogStream", "logs:PutLogEvents"],
+      "Resource": "arn:aws:logs:ap-south-1:050649356073:log-group:/cloudops/application:*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": ["ecr:GetAuthorizationToken"],
+      "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "ecr:BatchCheckLayerAvailability",
+        "ecr:GetDownloadUrlForLayer",
+        "ecr:BatchGetImage"
+      ],
+      "Resource": "arn:aws:ecr:ap-south-1:050649356073:repository/cloudops"
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+node_modules
+dist
+build
+data
+.env*
+.aws
+.ssh
+*.key
+*.p12
+*.pfx
+.git
+.npm-cache
+*.log

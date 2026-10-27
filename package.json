@@ -1,0 +1,43 @@
+{
+  "name": "cloudops-ai",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "build": "vite build --configLoader native",
+    "start": "node --env-file-if-exists=.env server/index.js",
+    "worker": "node --env-file-if-exists=.env server/worker.js",
+    "migrate": "node --env-file-if-exists=.env scripts/migrate.mjs",
+    "admin:reset": "node --env-file-if-exists=.env scripts/reset-password.mjs",
+    "example": "node --env-file-if-exists=.env examples/target.js",
+    "package:lambda": "node scripts/package-lambda.mjs",
+    "test": "node --test server/*.test.js"
+  },
+  "dependencies": {
+    "@aws-sdk/client-cloudwatch": "^3.1148.0",
+    "@aws-sdk/client-s3": "^3.1148.0",
+    "@aws-sdk/client-sns": "^3.1148.0",
+    "@aws-sdk/client-sqs": "^3.1148.0",
+    "@aws-sdk/client-ssm": "^3.1148.0",
+    "express": "^5.1.0",
+    "express-rate-limit": "^8.7.1",
+    "helmet": "^8.3.0",
+    "ipaddr.js": "^2.5.0",
+    "lucide-react": "^0.468.0",
+    "pg": "^8.13.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "recharts": "^3.0.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.4.0",
+    "concurrently": "^9.1.0",
+    "esbuild": "^0.28.2",
+    "prettier": "^3.9.9",
+    "vite": "^7.0.0"
+  }
+}

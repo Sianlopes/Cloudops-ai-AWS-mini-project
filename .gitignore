@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.env*
+!.env.example
+.aws/
+.ssh/
+*.key
+*.p12
+*.pfx
+data/
+*.log
+build/
+*.sqlite*
+.npm-cache/
