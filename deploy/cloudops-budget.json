@@ -1,6 +1,0 @@
-{
-  "BudgetName": "CloudOps-monthly",
-  "BudgetLimit": { "Amount": "YOUR_LIMIT", "Unit": "USD" },
-  "TimeUnit": "MONTHLY",
-  "BudgetType": "COST"
-}

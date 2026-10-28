@@ -107,6 +107,31 @@ export async function openDatabase({
       "INSERT INTO schema_migrations(version,applied_at) VALUES(1,$1) ON CONFLICT(version) DO NOTHING",
       [new Date().toISOString()],
     );
+    // Migration 2: HTTP method and route on request events (per-endpoint monitoring).
+    // New databases get these columns from schema.sql; this adds them to existing ones.
+    for (const column of ["method", "route"]) {
+      if (db.kind === "postgresql")
+        await tx.query(
+          `ALTER TABLE events ADD COLUMN IF NOT EXISTS ${column} TEXT`,
+        );
+      else if (
+        !(
+          await tx.query("SELECT name FROM pragma_table_info('events')")
+        ).rows.some((c) => c.name === column)
+      )
+        await tx.query(`ALTER TABLE events ADD COLUMN ${column} TEXT`);
+    }
+    await tx.query(
+      "INSERT INTO schema_migrations(version,applied_at) VALUES(2,$1) ON CONFLICT(version) DO NOTHING",
+      [new Date().toISOString()],
+    );
+    await tx.query(
+      "UPDATE rules SET description=$1,unit=$2 WHERE id='rule-errors' AND description='HTTP 5xx responses in a five-minute window'",
+      [
+        "HTTP 5xx responses per endpoint in a five-minute window",
+        "% · minimum 10 requests per endpoint",
+      ],
+    );
     await tx.query(
       "INSERT INTO settings(id,workspace,email,region,retention) VALUES(1,$1,$2,$3,30) ON CONFLICT(id) DO NOTHING",
       ["CloudOps workspace", "", "ap-south-1"],
@@ -131,9 +156,9 @@ export async function openDatabase({
       [
         "rule-errors",
         "API error rate",
-        "HTTP 5xx responses in a five-minute window",
+        "HTTP 5xx responses per endpoint in a five-minute window",
         "errorRate",
-        "% · minimum 20 requests",
+        "% · minimum 10 requests per endpoint",
         "high",
       ],
     );

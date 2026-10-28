@@ -1,27 +1,33 @@
 import React, { useState } from "react";
-import { Cloud, LockKeyhole, ArrowRight, ShieldCheck } from "lucide-react";
+import { Cloud, LoaderCircle } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+
 export default function AuthScreen({ setupRequired, api, onSuccess }) {
   const [error, setError] = useState(""),
     [busy, setBusy] = useState(false);
   return (
-    <div className="auth-page">
-      <div className="auth-brand">
-        <span className="brand-mark">
-          <Cloud size={23} />
-        </span>
-        cloudops <span className="ai-label">AI</span>
-      </div>
-      <section className="auth-card">
-        <span className="auth-icon">
-          <LockKeyhole size={24} />
-        </span>
-        <h1>{setupRequired ? "Set up your workspace" : "Welcome back"}</h1>
-        <p>
-          {setupRequired
-            ? "Create your administrator account to start monitoring."
-            : "Sign in to your cloud operations workspace."}
-        </p>
+    <div className="flex min-h-svh flex-col items-center justify-center bg-muted/40 p-6">
+      <div className="w-full max-w-sm">
+        <div className="mb-8 flex flex-col items-center gap-3 text-center">
+          <span className="flex size-10 items-center justify-center rounded-lg bg-primary text-primary-foreground">
+            <Cloud className="size-5" />
+          </span>
+          <div>
+            <h1 className="text-xl font-semibold tracking-tight">
+              {setupRequired ? "Set up CloudOps" : "Sign in to CloudOps"}
+            </h1>
+            <p className="mt-1 text-sm text-muted-foreground">
+              {setupRequired
+                ? "Create the administrator account."
+                : "Monitoring and incident management."}
+            </p>
+          </div>
+        </div>
         <form
+          className="flex flex-col gap-4 rounded-lg border bg-background p-6"
           onSubmit={async (e) => {
             e.preventDefault();
             setError("");
@@ -39,9 +45,10 @@ export default function AuthScreen({ setupRequired, api, onSuccess }) {
             }
           }}
         >
-          <label className="field">
-            Email address
-            <input
+          <div className="flex flex-col gap-2">
+            <Label htmlFor="email">Email</Label>
+            <Input
+              id="email"
               name="email"
               type="email"
               autoComplete="username"
@@ -49,10 +56,11 @@ export default function AuthScreen({ setupRequired, api, onSuccess }) {
               required
               maxLength={254}
             />
-          </label>
-          <label className="field">
-            Password
-            <input
+          </div>
+          <div className="flex flex-col gap-2">
+            <Label htmlFor="password">Password</Label>
+            <Input
+              id="password"
               name="password"
               type="password"
               autoComplete={setupRequired ? "new-password" : "current-password"}
@@ -60,32 +68,23 @@ export default function AuthScreen({ setupRequired, api, onSuccess }) {
               minLength={12}
               maxLength={128}
             />
-            <span className="form-hint">
-              {setupRequired
-                ? "Use at least 12 characters. No default password is provided."
-                : "Use your administrator password."}
-            </span>
-          </label>
+            {setupRequired && (
+              <p className="text-xs text-muted-foreground">
+                At least 12 characters.
+              </p>
+            )}
+          </div>
           {error && (
-            <div className="auth-error" role="alert">
-              {error}
-            </div>
+            <Alert variant="destructive" role="alert">
+              <AlertDescription>{error}</AlertDescription>
+            </Alert>
           )}
-          <button className="button primary auth-submit" disabled={busy}>
-            {busy
-              ? "Please wait…"
-              : setupRequired
-                ? "Create workspace"
-                : "Sign in"}
-            <ArrowRight size={16} />
-          </button>
+          <Button className="w-full" disabled={busy}>
+            {busy && <LoaderCircle className="animate-spin" />}
+            {setupRequired ? "Create account" : "Sign in"}
+          </Button>
         </form>
-        <div className="auth-footer">
-          <ShieldCheck size={15} />
-          Secure sessions · private workspace
-        </div>
-      </section>
-      <p className="auth-caption">Clarity for your cloud operations.</p>
+      </div>
     </div>
   );
 }

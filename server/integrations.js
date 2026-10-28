@@ -52,18 +52,50 @@ export async function sendSignal(signal) {
     { abortSignal: AbortSignal.timeout(10000) },
   );
 }
+const cap = (text) => text.charAt(0).toUpperCase() + text.slice(1);
+// Plain-text email (SNS email subscriptions send text, not HTML).
+export function formatAlert(alert, origin = process.env.APP_ORIGIN) {
+  const opened = alert.status !== "resolved";
+  const subject = `[CloudOps] ${opened ? "Incident opened" : "Resolved"} · ${cap(alert.severity)} · ${alert.title}`.slice(0, 100);
+  const when = new Date(alert.at)
+    .toISOString()
+    .replace("T", " ")
+    .replace(/:\d\d\.\d+Z$/, " UTC");
+  const link = origin
+    ? `${origin.replace(/\/+$/, "")}/${alert.serviceId ? `#/services/${alert.serviceId}` : ""}`
+    : null;
+  const message = [
+    opened ? "A new incident was detected." : "An incident has been resolved.",
+    "",
+    `Service:   ${alert.service}`,
+    `Incident:  ${alert.title}`,
+    `Severity:  ${cap(alert.severity)}`,
+    `Status:    ${opened ? "Open" : "Resolved"}`,
+    `Time:      ${when}`,
+    `ID:        ${alert.id}`,
+    "",
+    opened ? "What CloudOps saw" : "How it recovered",
+    `  ${alert.evidence}`,
+    ...(link ? ["", opened ? "Investigate:" : "Review:", `  ${link}`] : []),
+    "",
+    "CloudOps monitoring and incident management",
+  ].join("\n");
+  return { subject, message };
+}
 export async function sendAlert(alert) {
   if (!process.env.SNS_TOPIC_ARN)
     throw Error("SNS_TOPIC_ARN is not configured. Alert remains queued.");
+  const { subject, message } = formatAlert(alert);
   return new SNSClient(options()).send(
     new PublishCommand({
       TopicArn: process.env.SNS_TOPIC_ARN,
-      Subject:
-        `CloudOps ${alert.status}: ${alert.severity} — ${alert.service}`.slice(
-          0,
-          100,
-        ),
-      Message: JSON.stringify(alert, null, 2),
+      Subject: subject,
+      Message: message,
+      // Lets subscriptions filter by severity or status later without parsing the text.
+      MessageAttributes: {
+        severity: { DataType: "String", StringValue: String(alert.severity) },
+        status: { DataType: "String", StringValue: String(alert.status) },
+      },
     }),
     { abortSignal: AbortSignal.timeout(10000) },
   );

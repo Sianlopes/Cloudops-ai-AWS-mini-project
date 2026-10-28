@@ -124,7 +124,7 @@ export async function probe(
           method: "GET",
           agent: false,
           headers: {
-            "User-Agent": "CloudOps-AI/1.0",
+            "User-Agent": "CloudOps/1.0",
             Accept: "application/json",
           },
           lookup: (hostname, opts, cb) =>
@@ -142,8 +142,8 @@ export async function probe(
           );
         },
       );
-      request.on("error", () =>
-        finish(false, null, "Connection or TLS verification failed"),
+      request.on("error", (error) =>
+        finish(false, null, describeNetworkError(error)),
       );
       request.end();
     });
@@ -156,4 +156,19 @@ export async function probe(
       error: error.message,
     };
   }
+}
+// Plain-language reason for a failed connection, based on the Node error code.
+export function describeNetworkError(error) {
+  const code = error?.code || error?.cause?.code || "";
+  if (code === "ECONNREFUSED") return "Connection refused: nothing is listening on that port";
+  if (code === "ENOTFOUND" || code === "EAI_AGAIN") return "DNS lookup failed: host name not found";
+  if (code === "ECONNRESET" || code === "EPIPE") return "Connection reset by the server";
+  if (code === "ETIMEDOUT" || code === "EHOSTUNREACH" || code === "ENETUNREACH")
+    return "Host unreachable or connection timed out";
+  if (
+    /CERT|SSL|TLS/i.test(code) ||
+    /certificate|self.signed|altnames/i.test(error?.message || "")
+  )
+    return "TLS certificate could not be verified";
+  return `Connection failed${code ? ` (${code})` : ""}`;
 }

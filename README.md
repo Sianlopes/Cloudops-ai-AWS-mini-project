@@ -1,110 +1,93 @@
-# CloudOps AI
+# CloudOps
 
-A live monitoring and incident-management application with a neutral React dashboard and a Node.js/Express backend.
+Monitoring and incident management for websites and APIs, built on AWS.
 
-## What works now
+CloudOps checks your services on a schedule, learns what is happening inside connected applications (requests, errors, failed sign-ins), opens an **incident** when a rule trips, and emails the administrator. A web dashboard shows service health, every endpoint of a connected app, metrics, logs and incidents.
 
-- Administrator setup/login/logout, scrypt password hashing, expiring HttpOnly session cookies, CSRF protection, origin checks, rate limits, and security headers.
-- Scheduled real HTTP(S) health checks: configured interval, timeout, expected status, pause/resume, and check-now controls.
-- Availability and latency detection, incident deduplication, acknowledgement, evidence, timeline, and automatic recovery.
-- Per-service ingestion tokens for request events, login failures, CPU samples, and logs. Tokens are hashed; event retries are idempotent.
-- Error-rate and account-specific authentication rules, sustained CPU thresholds, and rolling statistical latency anomalies.
-- Dashboard polling, actual metric charts, searchable events, CSV exports, worker heartbeat warnings, and delivery retries.
-- Normalized tables, database transactions, worker leases, and durable delivery outbox. SQLite for local development; PostgreSQL required in production.
-- AWS SDK integration: SQS producer, FIFO-aware Lambda processor, SNS alerts, CloudWatch CPU reads, Parameter Store configuration, and S3 log archives.
-- Docker deployment files, IAM templates, and detailed manual AWS Console instructions.
+![CloudOps architecture on AWS](docs/architecture.png)
 
-There are no pre-populated service metrics or incidents in live mode. The previous demo data file is preserved but not imported.
+Editable vector version: [docs/architecture.svg](docs/architecture.svg).
 
-## Start locally
+## What it does
+
+- **Health checks:** real HTTP(S) requests on a schedule (interval, timeout, expected status). Works for any public website or API, with nothing to install on the target.
+- **Connected applications:** an application adds a few lines of code and a per-service **ingestion token**. CloudOps then sees every request (method, route, status, duration), failed sign-ins and custom events, and builds a per-endpoint view automatically. The in-app **Connect your app** guide gives copy-paste code for Node.js, Python and plain HTTP.
+- **Incidents:** availability, response latency, statistical latency anomalies, API error rate **per endpoint**, repeated failed sign-ins per account, and sustained CPU. Incidents deduplicate, carry evidence and a timeline, and resolve automatically on recovery.
+- **Alerts:** an email through Amazon SNS when an incident opens or resolves.
+- **Dashboard:** overview, services, a full page per service (endpoints with p95 latency, charts, incidents, logs), metrics, logs, monitoring rules and settings.
+- **Event pipeline on AWS:** events go to an SQS FIFO queue, a Lambda function applies the rules and writes incidents to RDS PostgreSQL, SNS sends the alert, S3 keeps log archives, CloudWatch supplies CPU.
+- **Security:** hashed passwords, secure sessions, CSRF protection, origin checks, rate limits, SSRF protection for monitored URLs, private subnets, least-privilege IAM roles and no static AWS keys.
+
+## Run it locally
 
 Requires **Node.js 24**.
 
 ```sh
 npm ci
-npm run dev
+npm run dev          # dashboard on http://127.0.0.1:5173, API and worker included
 ```
 
-On Windows PowerShell use `npm.cmd` if script execution policy blocks `npm.ps1`. Open **http://127.0.0.1:5173**. The first visit lets you create an administrator; choose your own password of at least 12 characters. A monitoring worker starts with the development server.
+The first visit asks you to create the administrator account. Locally the data lives in `data/cloudops.sqlite`; AWS deployments use PostgreSQL.
 
-In another terminal, run `npm run example`, register `http://127.0.0.1:4100/health`, and follow [the real HTTP testing walkthrough](docs/LOCAL-TESTING.md).
-
-Copy `.env.example` to `.env` to change configuration. Without `DATABASE_URL`, data lives in `data/cloudops.sqlite`. Do not run local development mode on a public server. The loopback test-target exception is restricted to `127.0.0.1:4100` and disabled in production.
-
-## Build and verify
+To try it with a realistic application, start the demo shop in a second terminal:
 
 ```sh
-npm test
-npm run build
-npm start
+npm run demo-shop    # http://127.0.0.1:4100  (store)  and  /control  (presenter controls)
 ```
 
-`npm start` serves the compiled UI and API on port 4000. Start `npm run worker` in another terminal when not using the development command. Database schema/default rules are applied idempotently at startup; `npm run migrate` also applies them explicitly.
+See [docs/LOCAL-TESTING.md](docs/LOCAL-TESTING.md) for a walkthrough.
 
-The automated suite exercises real HTTP failure/timeout/redirect handling, network target protection, authentication and CSRF, ingestion token scope, idempotency, thresholds, anomaly warm-up, recovery, worker claims, retention, alert retries, and FIFO partial failure behavior.
+```sh
+npm test             # automated tests
+npm run build        # production build of the dashboard
+npm start            # serve the built dashboard and API on port 4000
+npm run worker       # the worker process (checks, delivery), when not using npm run dev
+```
 
-SQLite tests do not verify your RDS instance or AWS account. The Docker/PostgreSQL and AWS acceptance steps must pass before relying on production alerts. Browser visual verification was unavailable in the coding environment.
+## Connect your own application
+
+1. In the dashboard, add a service and tick **Connect my application** (or open a service and click **Connect your app**).
+2. Copy the ingestion token into your server's environment as `CLOUDOPS_INGESTION_TOKEN`.
+3. Add the generated code to your app. Every request, error and failed sign-in is reported, and the Endpoints tab fills in by itself.
+
+Any language can report an event with one HTTP request:
+
+```sh
+curl -X POST https://YOUR-CLOUDOPS/api/events \
+  -H "Authorization: Bearer $CLOUDOPS_INGESTION_TOKEN" -H "Content-Type: application/json" \
+  -d '{"id":"evt-0001-unique","type":"request","method":"POST","route":"/api/orders","statusCode":502,"duration":120,"message":"POST /api/orders"}'
+```
+
+Event types: `request`, `auth_failure` (needs `subject`), `cpu` (needs `value`), `log`. Use the token only on a server, never in browser code.
 
 ## Deploy on AWS
 
-Follow [**AWS-DEPLOYMENT.md**](docs/AWS-DEPLOYMENT.md) in order. You perform the Console steps; this repository does not create or deploy AWS resources automatically.
+The whole environment is one CloudFormation template: VPC, subnets, NAT, ALB, EC2, RDS, SQS, Lambda, SNS, S3, CloudWatch, Parameter Store, IAM and a budget. Follow [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md). The same document covers updating the app and tearing everything down.
+
+## Project layout
 
 ```text
-Browser → HTTPS ALB → EC2 API/UI → RDS
-                     EC2 worker → scheduled HTTP checks
-Application events → API → durable outbox → SQS FIFO → Lambda → RDS incidents
-                                                          └→ alert outbox
-                     EC2 worker → SNS notifications / S3 archives
-                     EC2 worker ← CloudWatch CPU metrics
+src/            React dashboard (shadcn/ui and Tailwind)
+server/         Express API, monitoring worker, rules and incident logic, Lambda handler
+scripts/        development launcher, migrations, Lambda packaging, admin password reset
+deploy/         CloudFormation template and the demo shop's service file
+examples/       Acme Shop: a demo application that is monitored by CloudOps
+docs/           architecture diagram, deployment and local testing guides
+certs/          Amazon RDS CA bundle (used for verified TLS to PostgreSQL)
 ```
 
-Production uses a separate worker process, PostgreSQL with verified TLS, HTTPS Secure cookies, IAM instance/function roles, and configuration from Parameter Store. The application does not require static AWS access keys. AWS integration indicators mean configuration is present; they do not prove delivery. Confirm real messages and objects using the guide.
+## Reset the administrator password
 
-## Instrument your own application
+Locally: set `RESET_EMAIL` and `RESET_PASSWORD` in an untracked `.env`, run `npm run admin:reset`, then remove those values. All sessions are revoked.
 
-Generate an ingestion token in a service's detail panel. Use [examples/cloudops-client.js](examples/cloudops-client.js) from your application's backend:
+On AWS: create the temporary Parameter Store values `/cloudops/prod/RESET_EMAIL` and `/cloudops/prod/RESET_PASSWORD`, run `node scripts/reset-password.mjs` on the server, and delete the parameters afterwards.
 
-```js
-import { createCloudOpsClient } from './cloudops-client.js';
+## Operating notes
 
-const telemetry = createCloudOpsClient({
-  url: process.env.CLOUDOPS_URL,
-  token: process.env.CLOUDOPS_INGESTION_TOKEN,
-  onError: () => console.error('CloudOps telemetry delivery failed'),
-});
-app.use(telemetry.middleware);
-
-// Emit at the point where your application actually rejects a login.
-telemetry.emit({
-  type: 'auth_failure',
-  subject: accountId,
-  message: 'Login rejected',
-  level: 'warn',
-});
-```
-
-The helper's bounded in-memory buffer retries deliveries five times and never blocks request responses. It is not a durable log agent; events can be lost when the monitored application crashes. Use your established logging pipeline when durable event collection is required. Never log passwords, bearer tokens, payment details, or other unnecessary sensitive payloads.
-
-## Reset an administrator password
-
-Local: temporarily set `RESET_EMAIL` and `RESET_PASSWORD` in your untracked `.env`, run `npm run admin:reset`, then remove those values. The operation revokes all sessions. It requires access to the server environment; no unauthenticated password-reset API exists.
-
-AWS: create temporary SecureString `/cloudops/prod/RESET_PASSWORD` and String `/cloudops/prod/RESET_EMAIL` parameters. In the EC2 deployment directory run:
-
-```sh
-sudo docker compose run --rm api node scripts/reset-password.mjs
-```
-
-Remove the reset parameters immediately afterward. Changing the bootstrap `ADMIN_PASSWORD` parameter alone does not change an existing account.
-
-## Operating boundaries
-
-This is a single-workspace operations MVP for a controlled deployment. It does not implement multi-tenant isolation, SSO/MFA, on-call rotations, escalation policies, tracing, automatic remediation, or a trained AI model. Latency anomalies use an explicit statistical rolling baseline.
-
-The dashboard returns the latest 500 incidents/logs and 24 hours of metric aggregates. It is designed for modest service counts; validate your workload and database behavior before scaling. Transactions currently use an application advisory lock for simple cross-process consistency. Larger workloads require narrower locks, query pagination, and capacity testing.
-
-Alerts are delivered at least once. A worker crash after a successful publish but before recording it can cause a duplicate notification; the incident ID is included for correlation. Ten failed delivery attempts mark a job failed for manual retry. No SNS configuration means no email delivery. Recoveries can generate notifications for all configured severities.
-
-Default target protection blocks private, loopback, reserved, and metadata addresses, pins validated DNS results, and rejects redirects. Exact trusted private hostnames can be explicitly allowlisted by server configuration. Use network egress controls too. CPU/request absence appears as missing data, not zero. An independent platform watchdog is necessary when this monitoring system itself fails.
-
-Daily S3 archives cover the previous UTC day. Check archive delivery failures; downtime or very late telemetry may require a manual backfill. Database retention still runs on the configured schedule, so archive verification matters. Incident history is retained independently of telemetry retention. Keep backups and test restores.
+- A single-workspace operations tool for a controlled deployment. There is no multi-tenant isolation, SSO/MFA, on-call rotation or tracing.
+- Detection uses configurable rules and a rolling statistical baseline for latency. It is not a trained model.
+- Alerts are delivered at least once; a crash between publishing and recording can send a duplicate. The incident ID is included for correlation.
+- Monitored URLs must be public: private, loopback and metadata addresses are blocked, and redirects are not followed.
+- The dashboard returns the latest 500 incidents and logs and 24 hours of metrics. Validate behaviour before scaling to many services.
+- Health checks run from one location (the app server's NAT address), so a site that blocks datacenter addresses can look down.
+- Without a domain the demo runs over HTTP. For production, put an ACM certificate on the load balancer and unset `ALLOW_INSECURE_HTTP`.

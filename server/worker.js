@@ -134,6 +134,25 @@ export async function drainOutbox(
     }
   }
 }
+// Queue events in [from, to) for upload to S3 in 1000-record NDJSON chunks.
+async function queueArchive(tx, prefix, from, to) {
+  let offset = 0;
+  while (true) {
+    const records = (
+      await tx.query(
+        "SELECT * FROM events WHERE at>=$1 AND at<$2 ORDER BY at,id LIMIT 1000 OFFSET $3",
+        [from, to, offset],
+      )
+    ).rows;
+    if (!records.length) break;
+    await enqueue(tx, "archive", {
+      key: `${prefix}/part-${String(offset / 1000).padStart(5, "0")}.ndjson`,
+      records,
+    });
+    offset += records.length;
+  }
+  return offset;
+}
 export async function archivePreviousDay(db) {
   if (!process.env.S3_LOG_BUCKET) return;
   const day = new Date(Date.now() - 86400000).toISOString().slice(0, 10),
@@ -149,33 +168,33 @@ export async function archivePreviousDay(db) {
         .length
     )
       return;
-    let offset = 0;
-    while (true) {
-      const records = (
-        await tx.query(
-          "SELECT * FROM events WHERE at>=$1 AND at<$2 ORDER BY at,id LIMIT 1000 OFFSET $3",
-          [
-            `${day}T00:00:00.000Z`,
-            new Date(
-              new Date(`${day}T00:00:00Z`).getTime() + 86400000,
-            ).toISOString(),
-            offset,
-          ],
-        )
-      ).rows;
-      if (!records.length) break;
-      await enqueue(tx, "archive", {
-        key: `logs/${day}/part-${String(offset / 1000).padStart(5, "0")}.ndjson`,
-        records,
-      });
-      offset += records.length;
-    }
+    await queueArchive(
+      tx,
+      `logs/${day}`,
+      `${day}T00:00:00.000Z`,
+      new Date(new Date(`${day}T00:00:00Z`).getTime() + 86400000).toISOString(),
+    );
     await tx.query("INSERT INTO heartbeats(id,at,detail) VALUES($1,$2,$3)", [
       marker,
       iso(),
       "Archive chunks queued",
     ]);
   });
+}
+// On-demand archive of the last 24 hours, used by the "Archive to S3 now" action.
+export async function archiveNow(db) {
+  if (!process.env.S3_LOG_BUCKET) throw Error("S3_LOG_BUCKET is not configured.");
+  const now = new Date();
+  const prefix = `logs/manual-${now.toISOString().replace(/[:.]/g, "-")}`;
+  const count = await db.tx((tx) =>
+    queueArchive(
+      tx,
+      prefix,
+      new Date(now.getTime() - 86400000).toISOString(),
+      new Date(now.getTime() + 1000).toISOString(),
+    ),
+  );
+  return { count, prefix };
 }
 export function startWorker(db, { interval = 5000 } = {}) {
   let stopped = false,

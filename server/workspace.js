@@ -1,3 +1,4 @@
+import { endpointKey, summarize } from "./insights.js";
 export async function workspace(db) {
   const [
     services,
@@ -5,18 +6,25 @@ export async function workspace(db) {
     timeline,
     rules,
     settings,
-    logs,
+    appLogs,
+    checkLogs,
     checks,
     events,
     worker,
     delivery,
+    telemetry,
   ] = await Promise.all([
     db.query("SELECT * FROM services ORDER BY name"),
     db.query("SELECT * FROM incidents ORDER BY detected_at DESC LIMIT 500"),
     db.query("SELECT * FROM timeline ORDER BY at"),
     db.query("SELECT * FROM rules ORDER BY id"),
     db.query("SELECT * FROM settings WHERE id=1"),
-    db.query("SELECT * FROM events ORDER BY at DESC LIMIT 500"),
+    db.query(
+      "SELECT * FROM events WHERE type<>'health_check' ORDER BY at DESC LIMIT 400",
+    ),
+    db.query(
+      "SELECT * FROM events WHERE type='health_check' ORDER BY at DESC LIMIT 150",
+    ),
     db.query("SELECT * FROM checks WHERE at>$1 ORDER BY at", [
       new Date(Date.now() - 86400000).toISOString(),
     ]),
@@ -28,7 +36,17 @@ export async function workspace(db) {
     db.query(
       "SELECT id,kind,status,attempts,next_attempt,last_error,sent_at FROM outbox ORDER BY next_attempt DESC LIMIT 50",
     ),
+    // Events pushed by the monitored application itself (not CloudOps' own health checks).
+    db.query(
+      "SELECT service_id, MAX(at) AS last_at FROM events WHERE type IN ('request','auth_failure','cpu','log') GROUP BY service_id",
+    ),
   ]);
+  const logs = {
+    rows: [...appLogs.rows, ...checkLogs.rows].sort((a, b) =>
+      b.at.localeCompare(a.at),
+    ),
+  };
+  const lastEvent = new Map(telemetry.rows.map((r) => [r.service_id, r.last_at]));
   const buckets = new Map();
   const bucket = (at) => {
     const key = new Date(
@@ -38,6 +56,7 @@ export async function workspace(db) {
       buckets.set(key, {
         timestamp: key,
         latencies: [],
+        durations: [],
         requests: 0,
         failedRequests: 0,
         cpuSamples: [],
@@ -51,7 +70,27 @@ export async function workspace(db) {
     else {
       b.requests++;
       if (e.status_code >= 500) b.failedRequests++;
+      if (Number.isFinite(Number(e.duration))) b.durations.push(Number(e.duration));
     }
+  }
+  const trafficRows = new Map();
+  for (const e of events.rows) {
+    if (e.type !== "request") continue;
+    if (!trafficRows.has(e.service_id)) trafficRows.set(e.service_id, []);
+    trafficRows.get(e.service_id).push(e);
+  }
+  const trafficFor = (id) => {
+    const rows = trafficRows.get(id);
+    if (!rows) return null;
+    return {
+      ...summarize(rows),
+      endpoints: new Set(rows.map(endpointKey)).size,
+    };
+  };
+  const recent = new Map();
+  for (const c of checks.rows) {
+    if (!recent.has(c.service_id)) recent.set(c.service_id, []);
+    recent.get(c.service_id).push(c);
   }
   const metrics = [...buckets.values()]
     .sort((a, b) => a.timestamp.localeCompare(b.timestamp))
@@ -61,6 +100,10 @@ export async function workspace(db) {
         ? Math.round(
             b.latencies.reduce((a, v) => a + v, 0) / b.latencies.length,
           )
+        : null,
+      // Average time the application itself took to answer real requests.
+      appLatency: b.durations.length
+        ? Math.round(b.durations.reduce((a, v) => a + v, 0) / b.durations.length)
         : null,
       requests: b.requests || null,
       errorRate: b.requests
@@ -94,6 +137,14 @@ export async function workspace(db) {
       instanceId: s.instance_id,
       lastChecked: s.last_checked,
       lastError: s.last_error,
+      traffic: trafficFor(s.id),
+      hasToken: !!s.key_hash,
+      lastEventAt: lastEvent.get(s.id) || null,
+      history: (recent.get(s.id) || []).slice(-48).map((c) => ({
+        at: c.at,
+        ok: !!c.success,
+        latency: c.latency,
+      })),
     })),
     incidents: incidents.rows.map((i) => ({
       id: i.id,
@@ -114,6 +165,7 @@ export async function workspace(db) {
       id: e.id,
       at: e.at,
       serviceId: e.service_id,
+      type: e.type,
       level: e.level,
       message: e.message,
       traceId: e.trace_id,

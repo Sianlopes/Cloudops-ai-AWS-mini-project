@@ -1,0 +1,18 @@
+[Unit]
+Description=Acme Shop demo application monitored by CloudOps
+After=network-online.target
+
+[Service]
+User=cloudops
+WorkingDirectory=/opt/cloudops
+ExecStart=/usr/local/bin/node examples/acme-shop/server.js
+Restart=always
+Environment=HOST=0.0.0.0
+Environment=PORT=4100
+# The CloudOps address the shop reports to (the load balancer's DNS name)
+Environment=CLOUDOPS_URL=http://REPLACE-WITH-LOAD-BALANCER-DNS-NAME
+# The ingestion token is pasted on the shop's /control page and saved here
+Environment=SHOP_STATE_FILE=/opt/cloudops/data/acme-shop-telemetry.json
+
+[Install]
+WantedBy=multi-user.target

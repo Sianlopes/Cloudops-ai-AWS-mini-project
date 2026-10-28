@@ -5,10 +5,17 @@ import { randomUUID } from "node:crypto";
 import { openDatabase } from "./db.js";
 import { processSignal, maintenance } from "./domain.js";
 import { createApp } from "./index.js";
-import { claimServices, drainOutbox } from "./worker.js";
-import { probe, publicAddress, checkedAddress } from "./network.js";
+import { claimServices, drainOutbox, archiveNow } from "./worker.js";
+import {
+  probe,
+  publicAddress,
+  checkedAddress,
+  describeNetworkError,
+} from "./network.js";
 import { workspace } from "./workspace.js";
 import { createHandler } from "./lambda.js";
+import { serviceInsights, percentile } from "./insights.js";
+import { formatAlert } from "./integrations.js";
 async function fixture() {
   const db = await openDatabase({
     file: ":memory:",
@@ -475,4 +482,238 @@ test("authenticated API rejects anonymous access and missing CSRF, and accepts t
     await new Promise((r) => server.close(r));
     await db.close();
   }
+});
+test("network errors are described in plain language", () => {
+  assert.match(describeNetworkError({ code: "ECONNREFUSED" }), /refused/i);
+  assert.match(describeNetworkError({ code: "ENOTFOUND" }), /DNS/);
+  assert.match(describeNetworkError({ code: "ECONNRESET" }), /reset/i);
+  assert.match(
+    describeNetworkError({ code: "DEPTH_ZERO_SELF_SIGNED_CERT" }),
+    /certificate/i,
+  );
+  assert.match(describeNetworkError({ code: "EWEIRD" }), /EWEIRD/);
+});
+test("uptime covers only the last 24 hours", async () => {
+  const { db, id } = await fixture();
+  try {
+    // An old failure outside the window must not count against uptime.
+    await db.query(
+      "INSERT INTO checks(id,service_id,at,success,status_code,latency,error) VALUES($1,$2,$3,0,503,100,'old')",
+      [randomUUID(), id, new Date(Date.now() - 3 * 86400000).toISOString()],
+    );
+    await processSignal(db, check(id, true, 0));
+    await processSignal(db, check(id, true, 1));
+    assert.equal((await workspace(db)).services[0].uptime, 100);
+  } finally {
+    await db.close();
+  }
+});
+test("archive now queues recent events for S3 and refuses without a bucket", async () => {
+  const { db, id } = await fixture();
+  const previous = process.env.S3_LOG_BUCKET;
+  try {
+    delete process.env.S3_LOG_BUCKET;
+    await assert.rejects(() => archiveNow(db), /not configured/);
+    process.env.S3_LOG_BUCKET = "test-bucket";
+    await db.query(
+      "INSERT INTO events(id,service_id,type,subject,at,level,message,trace_id) VALUES($1,$2,'log','',$3,'info','hello','t')",
+      [randomUUID(), id, new Date().toISOString()],
+    );
+    const result = await archiveNow(db);
+    assert.equal(result.count, 1);
+    assert.match(result.prefix, /^logs\/manual-/);
+    const jobs = (await db.query("SELECT * FROM outbox WHERE kind='archive'")).rows;
+    assert.equal(jobs.length, 1);
+    assert.match(JSON.parse(jobs[0].payload).key, /part-00000\.ndjson$/);
+  } finally {
+    if (previous === undefined) delete process.env.S3_LOG_BUCKET;
+    else process.env.S3_LOG_BUCKET = previous;
+    await db.close();
+  }
+});
+test("error-rate incident resolves once its window has no errors, even with little traffic", async () => {
+  const { db, id } = await fixture();
+  try {
+    for (let n = 0; n < 20; n++)
+      await processSignal(db, {
+        id: randomUUID(),
+        kind: "event",
+        serviceId: id,
+        at: new Date().toISOString(),
+        event: { type: "request", statusCode: 503, duration: 80, message: "Request failed", level: "error" },
+      });
+    const status = async () =>
+      (await db.query("SELECT status FROM incidents WHERE rule_id='rule-errors'")).rows[0].status;
+    assert.equal(await status(), "open");
+    // The failures age out of the five-minute window and traffic has stopped.
+    await db.query("UPDATE events SET at=$1", [new Date(Date.now() - 600000).toISOString()]);
+    await processSignal(db, check(id, true, 0));
+    assert.equal(await status(), "resolved");
+  } finally {
+    await db.close();
+  }
+});
+test("the demo shop runs exactly the code the CloudOps integration guide shows customers", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const { shopClientSource } = await import("../scripts/sync-shop-client.mjs");
+  const onDisk = await readFile(new URL("../examples/acme-shop/cloudops.cjs", import.meta.url), "utf8");
+  assert.equal(onDisk, shopClientSource(), "Run: node scripts/sync-shop-client.mjs");
+});
+const request = (id, method, route, statusCode, duration, at = new Date().toISOString()) =>
+  processSignal(id.db, {
+    id: randomUUID(),
+    kind: "event",
+    serviceId: id.id,
+    at,
+    event: { type: "request", method, route, statusCode, duration, message: `${method} ${route}`, level: statusCode >= 500 ? "error" : "info" },
+  });
+test("insights summarize each endpoint with request counts, error rate and p95", async () => {
+  const f = await fixture();
+  try {
+    for (let n = 1; n <= 20; n++) await request(f, "GET", "/api/products", 200, n * 10);
+    for (let n = 0; n < 4; n++) await request(f, "POST", "/api/orders", n < 1 ? 502 : 201, 100);
+    const r = await serviceInsights(f.db, f.id, { range: "1h" });
+    assert.equal(r.traffic.requests, 24);
+    assert.equal(r.traffic.endpoints, 2);
+    const products = r.endpoints.find((e) => e.key === "GET /api/products");
+    assert.equal(products.requests, 20);
+    assert.equal(products.errors, 0);
+    assert.equal(products.avgMs, 105);
+    assert.equal(products.p95Ms, 190);
+    const orders = r.endpoints.find((e) => e.key === "POST /api/orders");
+    assert.equal(orders.errorRate, 25);
+    assert.equal(r.endpoints[0].key, "GET /api/products", "busiest endpoint first");
+    // filtering to one endpoint narrows the series and the logs to it
+    const only = await serviceInsights(f.db, f.id, { endpoint: "POST /api/orders" });
+    assert.equal(only.series.reduce((n, b) => n + (b.requests || 0), 0), 4);
+    assert.ok(only.logs.every((l) => l.message.startsWith("POST /api/orders")));
+    assert.equal(await serviceInsights(f.db, "missing"), null);
+  } finally {
+    await f.db.close();
+  }
+});
+test("percentile uses the nearest rank", () => {
+  assert.equal(percentile([], 0.95), null);
+  assert.equal(percentile([5], 0.95), 5);
+  assert.equal(percentile([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 0.95), 10);
+  assert.equal(percentile([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 0.5), 5);
+});
+test("error-rate incidents are raised per endpoint and resolve independently", async () => {
+  const f = await fixture();
+  try {
+    for (let n = 0; n < 12; n++) await request(f, "GET", "/api/products", 200, 20);
+    for (let n = 0; n < 10; n++) await request(f, "POST", "/api/orders", 502, 80);
+    const open = (await f.db.query("SELECT title,scope,evidence FROM incidents WHERE status<>'resolved'")).rows;
+    assert.equal(open.length, 1);
+    assert.equal(open[0].scope, "POST /api/orders");
+    assert.match(open[0].title, /API error rate: POST \/api\/orders \(Test service\)/);
+    assert.match(open[0].evidence, /10 of 10 requests to POST \/api\/orders/);
+    // the failing endpoint ages out of the window; the healthy one carries on
+    await f.db.query("UPDATE events SET at=$1 WHERE route='/api/orders'", [new Date(Date.now() - 600000).toISOString()]);
+    await request(f, "GET", "/api/products", 200, 20);
+    assert.equal((await f.db.query("SELECT status FROM incidents")).rows[0].status, "resolved");
+  } finally {
+    await f.db.close();
+  }
+});
+test("requests reported without route fields still count, grouped under the service", async () => {
+  const f = await fixture();
+  try {
+    for (let n = 0; n < 20; n++)
+      await processSignal(f.db, {
+        id: randomUUID(), kind: "event", serviceId: f.id, at: new Date().toISOString(),
+        event: { type: "request", statusCode: 503, duration: 50, message: "Old style request", level: "error" },
+      });
+    const incidents = (await f.db.query("SELECT scope,title FROM incidents")).rows;
+    assert.equal(incidents.length, 1);
+    assert.equal(incidents[0].scope, "");
+    assert.equal(incidents[0].title, "API error rate: Test service");
+    const r = await serviceInsights(f.db, f.id);
+    assert.equal(r.endpoints[0].key, "(no route)");
+  } finally {
+    await f.db.close();
+  }
+});
+test("the event API stores method and route, and derives them from old-style messages", async () => {
+  const f = await fixture();
+  let server;
+  try {
+    const app = createApp(f.db, { production: false });
+    server = await new Promise((r) => { const s = app.listen(0, "127.0.0.1", () => r(s)); });
+    const base = `http://127.0.0.1:${server.address().port}`;
+    const token = "t".repeat(64);
+    const { createHash } = await import("node:crypto");
+    await f.db.query("UPDATE services SET key_hash=$1 WHERE id=$2", [createHash("sha256").update(token).digest("hex"), f.id]);
+    const send = (body) => fetch(`${base}/api/events`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` }, body: JSON.stringify(body) });
+    assert.equal((await send({ id: "event-aaaa-0001", type: "request", method: "post", route: "/api/orders?x=1", statusCode: 201, duration: 5, message: "ignored text" })).status, 202);
+    assert.equal((await send({ id: "event-aaaa-0002", type: "request", statusCode: 200, duration: 5, message: "GET /api/products?page=2" })).status, 202);
+    for (const row of (await f.db.query("SELECT payload FROM outbox WHERE kind='signal'")).rows) {
+      const p = JSON.parse(row.payload);
+      await processSignal(f.db, p);
+    }
+    const got = (await f.db.query("SELECT method,route FROM events WHERE type='request' ORDER BY route")).rows;
+    assert.deepEqual(got.map((g) => `${g.method} ${g.route}`), ["POST /api/orders", "GET /api/products"]);
+  } finally {
+    server?.closeAllConnections();
+    server?.close();
+    await f.db.close();
+  }
+});
+test("migrating an older events table adds method and route without losing rows", async () => {
+  const { DatabaseSync } = await import("node:sqlite");
+  const { mkdtemp, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const dir = await mkdtemp(`${tmpdir()}/cloudops-migrate-`);
+  const file = `${dir}/old.sqlite`;
+  try {
+    const old = new DatabaseSync(file);
+    old.exec("CREATE TABLE services (id TEXT PRIMARY KEY); CREATE TABLE events (id TEXT PRIMARY KEY, service_id TEXT NOT NULL, type TEXT NOT NULL, subject TEXT NOT NULL DEFAULT '', at TEXT NOT NULL, value REAL, duration REAL, status_code INTEGER, level TEXT NOT NULL, message TEXT NOT NULL, trace_id TEXT NOT NULL);");
+    old.exec("INSERT INTO services VALUES('s1'); INSERT INTO events VALUES('e1','s1','log','','2026-01-01T00:00:00.000Z',NULL,NULL,NULL,'info','kept','t')");
+    old.close();
+    for (let n = 0; n < 2; n++) {
+      const db = await openDatabase({ file, url: "", production: false });
+      assert.equal((await db.query("SELECT message,method,route FROM events")).rows[0].message, "kept");
+      await db.close();
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+test("workspace reports real request durations and keeps request logs visible among health checks", async () => {
+  const f = await fixture();
+  try {
+    for (let n = 0; n < 3; n++) await request(f, "GET", "/api/products", 200, 100 + n * 100);
+    for (let n = 0; n < 200; n++) await processSignal(f.db, check(f.id, true, n));
+    const w = await workspace(f.db);
+    const withTraffic = w.metrics.find((m) => m.requests);
+    assert.equal(withTraffic.appLatency, 200);
+    assert.ok(w.metrics.some((m) => m.latency != null), "health check latency still reported");
+    assert.equal(w.logs.filter((l) => l.type === "request").length, 3, "requests not crowded out by health checks");
+    assert.ok(w.logs.some((l) => l.type === "health_check"));
+  } finally {
+    await f.db.close();
+  }
+});
+test("alert emails are readable plain text with a link back to the service", () => {
+  const alert = {
+    id: "INC-A92A8820",
+    serviceId: "svc-1",
+    service: "CCL SHOP",
+    title: "Response latency: CCL SHOP",
+    severity: "high",
+    status: "resolved",
+    evidence: "Two consecutive responses below the configured latency threshold.",
+    at: "2026-10-28T14:22:32.555Z",
+  };
+  const mail = formatAlert(alert, "http://example.test/");
+  assert.equal(mail.subject, "[CloudOps] Resolved · High · Response latency: CCL SHOP");
+  assert.match(mail.message, /^An incident has been resolved\./);
+  assert.match(mail.message, /Service: {3}CCL SHOP/);
+  assert.match(mail.message, /Time: {6}2026-10-28 14:22 UTC/);
+  assert.match(mail.message, /http:\/\/example\.test\/#\/services\/svc-1/);
+  assert.ok(!mail.message.includes("{"), "no JSON in the body");
+  const opened = formatAlert({ ...alert, status: "open", severity: "critical", title: "x".repeat(200) }, undefined);
+  assert.ok(opened.subject.startsWith("[CloudOps] Incident opened · Critical"));
+  assert.ok(opened.subject.length <= 100, "SNS limits subjects to 100 characters");
+  assert.ok(!opened.message.includes("http"), "no link when the app address is unknown");
 });

@@ -32,7 +32,10 @@ async function incident(tx, service, rule, scope, breach, evidence) {
     }
     const id = `INC-${randomUUID().slice(0, 8).toUpperCase()}`;
     const now = iso();
-    const title = `${rule.name}: ${service.name}`;
+    const title =
+      rule.metric === "errorRate" && scope
+        ? `${rule.name}: ${scope} (${service.name})`
+        : `${rule.name}: ${service.name}`;
     await tx.query(
       "INSERT INTO incidents(id,service_id,rule_id,scope,title,severity,status,detected_at,updated_at,evidence) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$8,$9)",
       [
@@ -50,6 +53,7 @@ async function incident(tx, service, rule, scope, breach, evidence) {
     await timeline(tx, id, "Automatically detected from real telemetry");
     await enqueue(tx, "alert", {
       id,
+      serviceId: service.id,
       service: service.name,
       title,
       severity: rule.severity,
@@ -69,6 +73,7 @@ async function incident(tx, service, rule, scope, breach, evidence) {
     );
     await enqueue(tx, "alert", {
       id: active.id,
+      serviceId: service.id,
       service: service.name,
       title: active.title,
       severity: active.severity,
@@ -130,6 +135,15 @@ export async function processSignal(db, signal) {
         success && latency <= slow.threshold ? s.recovery_streak + 1 : 0;
       s.total_checks++;
       s.successful_checks += success ? 1 : 0;
+      const window = (
+        await tx.query(
+          "SELECT COUNT(*) AS total, SUM(success) AS passed FROM checks WHERE service_id=$1 AND at>$2",
+          [s.id, new Date(Date.now() - 86400000).toISOString()],
+        )
+      ).rows[0];
+      const uptime = Number(window.total)
+        ? Number(((Number(window.passed) / Number(window.total)) * 100).toFixed(2))
+        : null;
       const status = !success
         ? "unhealthy"
         : latency > slow.threshold
@@ -140,7 +154,7 @@ export async function processSignal(db, signal) {
         [
           status,
           latency,
-          Number(((s.successful_checks / s.total_checks) * 100).toFixed(2)),
+          uptime,
           s.total_checks,
           s.successful_checks,
           s.failure_streak,
@@ -244,7 +258,7 @@ export async function processSignal(db, signal) {
     } else {
       const e = signal.event;
       await tx.query(
-        "INSERT INTO events(id,service_id,type,subject,at,value,duration,status_code,level,message,trace_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
+        "INSERT INTO events(id,service_id,type,subject,at,value,duration,status_code,level,message,trace_id,method,route) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
         [
           signal.id,
           s.id,
@@ -257,6 +271,8 @@ export async function processSignal(db, signal) {
           e.level,
           e.message,
           e.traceId || signal.id.slice(0, 12),
+          e.method ?? null,
+          e.route ?? null,
         ],
       );
     }
@@ -305,23 +321,60 @@ export async function evaluateWindows(tx, s, rules) {
           );
     }
     if (r.metric === "errorRate") {
-      const totals = (
+      // One incident per endpoint ("POST /api/orders"). Events without a route
+      // (older clients) are judged together under the service itself.
+      const groups = (
         await tx.query(
-          "SELECT COUNT(*) AS count,SUM(CASE WHEN status_code>=500 THEN 1 ELSE 0 END) AS failures FROM events WHERE service_id=$1 AND type='request' AND at>$2",
+          "SELECT method,route,COUNT(*) AS count,SUM(CASE WHEN status_code>=500 THEN 1 ELSE 0 END) AS failures FROM events WHERE service_id=$1 AND type='request' AND at>$2 GROUP BY method,route",
           [s.id, cutoff],
         )
-      ).rows[0];
-      const count = Number(totals.count),
-        pct = count ? (Number(totals.failures) / count) * 100 : 0;
-      if (count >= 20)
-        await incident(
-          tx,
-          s,
-          r,
-          "",
-          pct > r.threshold,
-          `${Number(totals.failures)} of ${count} requests returned HTTP 5xx (${pct.toFixed(1)}%) in ${r.window_seconds} seconds.`,
-        );
+      ).rows;
+      const seen = new Set();
+      for (const g of groups) {
+        const scope = g.route ? `${g.method || ""} ${g.route}`.trim() : "";
+        const count = Number(g.count),
+          failures = Number(g.failures || 0),
+          pct = count ? (failures / count) * 100 : 0,
+          minimum = scope ? 10 : 20;
+        seen.add(scope);
+        const what = scope ? `requests to ${scope}` : "requests";
+        if (count >= minimum)
+          await incident(
+            tx,
+            s,
+            r,
+            scope,
+            pct > r.threshold,
+            `${failures} of ${count} ${what} returned HTTP 5xx (${pct.toFixed(1)}%) in ${r.window_seconds} seconds.`,
+          );
+        // Too little traffic to judge a rate, but no errors at all: the incident is over.
+        else if (!failures)
+          await incident(
+            tx,
+            s,
+            r,
+            scope,
+            false,
+            `No HTTP 5xx responses${scope ? ` from ${scope}` : ""} in the last ${r.window_seconds} seconds.`,
+          );
+      }
+      // Endpoints that sent nothing during the window: their incidents are over.
+      const active = (
+        await tx.query(
+          "SELECT scope FROM incidents WHERE service_id=$1 AND rule_id=$2 AND status<>'resolved'",
+          [s.id, r.id],
+        )
+      ).rows;
+      for (const i of active)
+        if (!seen.has(i.scope))
+          await incident(
+            tx,
+            s,
+            r,
+            i.scope,
+            false,
+            `No requests${i.scope ? ` to ${i.scope}` : ""} in the last ${r.window_seconds} seconds.`,
+          );
     }
     if (r.metric === "cpu") {
       const samples = (

@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Acme Shop</title>
+    <link rel="stylesheet" href="shop.css" />
+  </head>
+  <body>
+    <header>
+      <div class="bar">
+        <a class="brand" href="#/">Acme Shop</a>
+        <nav>
+          <a href="#/" data-route="/">Shop</a>
+          <a href="#/orders" data-route="/orders">My orders</a>
+        </nav>
+        <div class="spacer"></div>
+        <span id="who" class="hint"></span>
+        <button class="btn" id="authBtn">Sign in</button>
+        <button class="btn" id="cartBtn">Cart <span class="count" id="cartCount">0</span></button>
+      </div>
+    </header>
+
+    <main>
+      <div id="banner" class="banner hidden"></div>
+
+      <section id="shopView">
+        <h1>Shop</h1>
+        <p class="sub">Everyday essentials, delivered fast.</p>
+        <div class="chips" id="chips"></div>
+        <div class="grid" id="grid"></div>
+      </section>
+
+      <section id="ordersView" class="hidden">
+        <h1>My orders</h1>
+        <p class="sub">Your order history.</p>
+        <div class="panel" id="orders"></div>
+      </section>
+    </main>
+
+    <!-- cart drawer -->
+    <div id="cartScrim" class="scrim hidden"></div>
+    <aside id="cart" class="drawer hidden" aria-label="Cart">
+      <div class="top">Your cart <button class="x" data-close="cart" aria-label="Close">×</button></div>
+      <div class="body" id="cartLines"></div>
+      <div class="foot">
+        <div class="total"><span>Total</span><span id="cartTotal">$0.00</span></div>
+        <button class="btn primary" id="checkout">Checkout</button>
+        <span class="hint" id="cartMsg"></span>
+      </div>
+    </aside>
+
+    <!-- product details -->
+    <div id="productScrim" class="scrim hidden"></div>
+    <div id="product" class="modal hidden" role="dialog" aria-modal="true">
+      <div class="top"><span id="pName"></span><button class="x" data-close="product" aria-label="Close">×</button></div>
+      <div class="body">
+        <div class="thumb" id="pEmoji" style="cursor: default; border-radius: 8px"></div>
+        <span class="hint" id="pCat"></span>
+        <p id="pDesc" style="margin: 0"></p>
+        <div class="total"><span id="pPrice"></span><button class="btn primary" id="pAdd">Add to cart</button></div>
+      </div>
+    </div>
+
+    <!-- sign in -->
+    <div id="loginScrim" class="scrim hidden"></div>
+    <div id="login" class="modal hidden" role="dialog" aria-modal="true">
+      <div class="top">Sign in <button class="x" data-close="login" aria-label="Close">×</button></div>
+      <form class="body" id="loginForm">
+        <input class="field" name="username" placeholder="Username" autocomplete="username" required />
+        <input class="field" name="password" type="password" placeholder="Password" autocomplete="current-password" required />
+        <button class="btn primary">Sign in</button>
+        <span class="hint">Demo accounts: <code>demo</code> / <code>shop123</code> or <code>priya</code> / <code>priya123</code></span>
+        <span class="hint" id="loginMsg" style="color: var(--danger)"></span>
+      </form>
+    </div>
+
+    <div id="toast" class="toast hidden"></div>
+    <script src="shop.js"></script>
+  </body>
+</html>

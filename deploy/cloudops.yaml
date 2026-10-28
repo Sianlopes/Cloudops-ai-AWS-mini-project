@@ -1,0 +1,600 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: CloudOps AI - VPC, EC2, ALB, RDS, SQS, Lambda, SNS, S3, CloudWatch, Parameter Store, IAM, Budgets
+
+Parameters:
+  AlertEmail:
+    Type: String
+    Description: Email that receives SNS alerts, CloudWatch alarms and budget notices
+  DbPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 12
+    AllowedPattern: "[A-Za-z0-9]+"
+    Description: RDS master password (letters and digits only)
+  AdminEmail:
+    Type: String
+    Description: First CloudOps administrator login
+  ArtifactBucket:
+    Type: String
+    Description: Pre-created S3 bucket holding the app tarball and Lambda zip
+  AppKey:
+    Type: String
+    Default: artifacts/cloudops-app.tgz
+  LambdaKey:
+    Type: String
+    Default: artifacts/cloudops-lambda.zip
+  InstanceType:
+    Type: String
+    Default: t3.small
+  BudgetUsd:
+    Type: Number
+    Default: 60
+  LatestAmi:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+
+Resources:
+  # ---------------------------------------------------------------- Network
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.20.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags: [{ Key: Name, Value: cloudops-vpc }]
+  Igw:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags: [{ Key: Name, Value: cloudops-igw }]
+  IgwAttach:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties: { VpcId: !Ref Vpc, InternetGatewayId: !Ref Igw }
+  PublicA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.20.0.0/24
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      Tags: [{ Key: Name, Value: cloudops-public-a }]
+  PublicB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.20.1.0/24
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      Tags: [{ Key: Name, Value: cloudops-public-b }]
+  AppA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.20.10.0/24
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      Tags: [{ Key: Name, Value: cloudops-app-a }]
+  AppB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.20.11.0/24
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      Tags: [{ Key: Name, Value: cloudops-app-b }]
+  DbA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.20.20.0/24
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      Tags: [{ Key: Name, Value: cloudops-db-a }]
+  DbB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.20.21.0/24
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      Tags: [{ Key: Name, Value: cloudops-db-b }]
+
+  NatEip:
+    Type: AWS::EC2::EIP
+    DependsOn: IgwAttach
+    Properties: { Domain: vpc }
+  Nat:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatEip.AllocationId
+      SubnetId: !Ref PublicA
+      Tags: [{ Key: Name, Value: cloudops-nat }]
+
+  PublicRt:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags: [{ Key: Name, Value: cloudops-public-rt }]
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: IgwAttach
+    Properties:
+      RouteTableId: !Ref PublicRt
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref Igw
+  PublicRtA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref PublicA, RouteTableId: !Ref PublicRt }
+  PublicRtB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref PublicB, RouteTableId: !Ref PublicRt }
+
+  AppRt:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags: [{ Key: Name, Value: cloudops-app-rt }]
+  AppRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref AppRt
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref Nat
+  AppRtA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref AppA, RouteTableId: !Ref AppRt }
+  AppRtB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref AppB, RouteTableId: !Ref AppRt }
+
+  DbRt:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags: [{ Key: Name, Value: cloudops-db-rt }]
+  DbRtA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref DbA, RouteTableId: !Ref DbRt }
+  DbRtB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref DbB, RouteTableId: !Ref DbRt }
+
+  S3Endpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.s3
+      VpcEndpointType: Gateway
+      RouteTableIds: [!Ref AppRt]
+
+  # --------------------------------------------------------- Security groups
+  AlbSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: CloudOps ALB - HTTP from the internet
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: 0.0.0.0/0 }
+        - { IpProtocol: tcp, FromPort: 8080, ToPort: 8080, CidrIp: 0.0.0.0/0 }
+      Tags: [{ Key: Name, Value: cloudops-alb-sg }]
+  AppSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: CloudOps app - port 4000 from the ALB only
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 4000, ToPort: 4000, SourceSecurityGroupId: !Ref AlbSg }
+        - { IpProtocol: tcp, FromPort: 4100, ToPort: 4100, SourceSecurityGroupId: !Ref AlbSg }
+      Tags: [{ Key: Name, Value: cloudops-app-sg }]
+  LambdaSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: CloudOps Lambda - no inbound
+      VpcId: !Ref Vpc
+      Tags: [{ Key: Name, Value: cloudops-lambda-sg }]
+  DbSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: CloudOps RDS - PostgreSQL from app and Lambda only
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 5432, ToPort: 5432, SourceSecurityGroupId: !Ref AppSg }
+        - { IpProtocol: tcp, FromPort: 5432, ToPort: 5432, SourceSecurityGroupId: !Ref LambdaSg }
+      Tags: [{ Key: Name, Value: cloudops-db-sg }]
+
+  # --------------------------------------------------------------------- RDS
+  DbSubnets:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: CloudOps private database subnets
+      SubnetIds: [!Ref DbA, !Ref DbB]
+  Database:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Delete
+    Properties:
+      DBInstanceIdentifier: cloudops-db
+      Engine: postgres
+      EngineVersion: "17.7"
+      DBInstanceClass: db.t4g.micro
+      AllocatedStorage: "20"
+      StorageType: gp3
+      StorageEncrypted: true
+      DBName: cloudops
+      MasterUsername: cloudops_admin
+      MasterUserPassword: !Ref DbPassword
+      DBSubnetGroupName: !Ref DbSubnets
+      VPCSecurityGroups: [!Ref DbSg]
+      PubliclyAccessible: false
+      MultiAZ: false
+      BackupRetentionPeriod: 1
+      DeletionProtection: false
+
+  # --------------------------------------------------------------- Messaging
+  IncidentDlq:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: cloudops-incidents-dlq.fifo
+      FifoQueue: true
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+  IncidentQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: cloudops-incidents.fifo
+      FifoQueue: true
+      VisibilityTimeout: 180
+      MessageRetentionPeriod: 345600
+      ReceiveMessageWaitTimeSeconds: 20
+      SqsManagedSseEnabled: true
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt IncidentDlq.Arn
+        maxReceiveCount: 5
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: cloudops-alerts
+      Subscription:
+        - { Protocol: email, Endpoint: !Ref AlertEmail }
+
+  # ---------------------------------------------------------------------- S3
+  LogBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+      LifecycleConfiguration:
+        Rules:
+          - { Id: expire-logs, Status: Enabled, Prefix: logs/, ExpirationInDays: 30 }
+
+  # ------------------------------------------------------------- CloudWatch
+  AppLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties: { LogGroupName: /cloudops/application, RetentionInDays: 30 }
+  LambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties: { LogGroupName: /aws/lambda/cloudops-incident-processor, RetentionInDays: 30 }
+
+  # --------------------------------------------------------------------- IAM
+  Ec2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: cloudops-ec2-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - { Effect: Allow, Principal: { Service: ec2.amazonaws.com }, Action: "sts:AssumeRole" }
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+      Policies:
+        - PolicyName: cloudops-app
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: ssm:GetParametersByPath
+                Resource:
+                  - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/cloudops/prod
+                  - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/cloudops/prod/*
+              - Effect: Allow
+                Action: sqs:SendMessage
+                Resource: !GetAtt IncidentQueue.Arn
+              - Effect: Allow
+                Action: sns:Publish
+                Resource: !Ref AlertTopic
+              - Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub ${LogBucket.Arn}/logs/*
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub arn:aws:s3:::${ArtifactBucket}/artifacts/*
+              - Effect: Allow
+                Action: cloudwatch:GetMetricStatistics
+                Resource: "*"
+  Ec2Profile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: cloudops-ec2-profile
+      Roles: [!Ref Ec2Role]
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: cloudops-lambda-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - { Effect: Allow, Principal: { Service: lambda.amazonaws.com }, Action: "sts:AssumeRole" }
+      Policies:
+        - PolicyName: cloudops-processor
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: ssm:GetParametersByPath
+                Resource:
+                  - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/cloudops/processor
+                  - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/cloudops/processor/*
+              - Effect: Allow
+                Action: [sqs:ReceiveMessage, sqs:DeleteMessage, sqs:GetQueueAttributes]
+                Resource: !GetAtt IncidentQueue.Arn
+              - Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/cloudops-incident-processor:*
+              - Effect: Allow
+                Action:
+                  - ec2:CreateNetworkInterface
+                  - ec2:DescribeNetworkInterfaces
+                  - ec2:DescribeSubnets
+                  - ec2:DeleteNetworkInterface
+                  - ec2:AssignPrivateIpAddresses
+                  - ec2:UnassignPrivateIpAddresses
+                Resource: "*"
+
+  # ------------------------------------------------------------------ Lambda
+  Processor:
+    Type: AWS::Lambda::Function
+    DependsOn: LambdaLogGroup
+    Properties:
+      FunctionName: cloudops-incident-processor
+      Runtime: nodejs24.x
+      Handler: server/lambda.handler
+      Role: !GetAtt LambdaRole.Arn
+      Timeout: 30
+      MemorySize: 512
+      Code: { S3Bucket: !Ref ArtifactBucket, S3Key: !Ref LambdaKey }
+      VpcConfig:
+        SubnetIds: [!Ref AppA, !Ref AppB]
+        SecurityGroupIds: [!Ref LambdaSg]
+      Environment:
+        Variables:
+          NODE_ENV: production
+          SSM_PARAMETER_PATH: /cloudops/processor/
+          DB_SSL: "true"
+          DB_CA_FILE: /var/task/certs/global-bundle.pem
+  QueueTrigger:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      FunctionName: !Ref Processor
+      EventSourceArn: !GetAtt IncidentQueue.Arn
+      BatchSize: 5
+      FunctionResponseTypes: [ReportBatchItemFailures]
+      ScalingConfig: { MaximumConcurrency: 5 }
+
+  # --------------------------------------------------------- Parameter Store
+  PAppOrigin:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /cloudops/prod/APP_ORIGIN
+      Type: String
+      Value: !Sub http://${Alb.DNSName}
+  PAdminEmail:
+    Type: AWS::SSM::Parameter
+    Properties: { Name: /cloudops/prod/ADMIN_EMAIL, Type: String, Value: !Ref AdminEmail }
+  PQueue:
+    Type: AWS::SSM::Parameter
+    Properties: { Name: /cloudops/prod/SQS_QUEUE_URL, Type: String, Value: !Ref IncidentQueue }
+  PTopic:
+    Type: AWS::SSM::Parameter
+    Properties: { Name: /cloudops/prod/SNS_TOPIC_ARN, Type: String, Value: !Ref AlertTopic }
+  PBucket:
+    Type: AWS::SSM::Parameter
+    Properties: { Name: /cloudops/prod/S3_LOG_BUCKET, Type: String, Value: !Ref LogBucket }
+
+  # --------------------------------------------------------------------- ALB
+  Alb:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: cloudops-alb
+      Scheme: internet-facing
+      Type: application
+      Subnets: [!Ref PublicA, !Ref PublicB]
+      SecurityGroups: [!Ref AlbSg]
+  AppTargets:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: cloudops-app-tg
+      VpcId: !Ref Vpc
+      Protocol: HTTP
+      Port: 4000
+      TargetType: instance
+      HealthCheckPath: /api/ready
+      HealthCheckIntervalSeconds: 15
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Targets: [{ Id: !Ref AppServer, Port: 4000 }]
+  HttpListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref Alb
+      Port: 80
+      Protocol: HTTP
+      DefaultActions: [{ Type: forward, TargetGroupArn: !Ref AppTargets }]
+
+  # Demo target ("Acme Shop") used for presentations: port 8080 -> app server :4100
+  ShopTargets:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: cloudops-shop-tg
+      VpcId: !Ref Vpc
+      Protocol: HTTP
+      Port: 4100
+      TargetType: instance
+      HealthCheckPath: /scenario
+      HealthCheckIntervalSeconds: 15
+      Targets: [{ Id: !Ref AppServer, Port: 4100 }]
+  ShopListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref Alb
+      Port: 8080
+      Protocol: HTTP
+      DefaultActions: [{ Type: forward, TargetGroupArn: !Ref ShopTargets }]
+
+  # --------------------------------------------------------------------- EC2
+  AppServer:
+    Type: AWS::EC2::Instance
+    DependsOn: [AppRoute, PAppOrigin]
+    Properties:
+      ImageId: !Ref LatestAmi
+      InstanceType: !Ref InstanceType
+      SubnetId: !Ref AppA
+      SecurityGroupIds: [!Ref AppSg]
+      IamInstanceProfile: !Ref Ec2Profile
+      Monitoring: true
+      MetadataOptions: { HttpTokens: required, HttpPutResponseHopLimit: 1 }
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs: { VolumeSize: 12, VolumeType: gp3, Encrypted: true }
+      Tags: [{ Key: Name, Value: cloudops-app }]
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          exec > /var/log/cloudops-bootstrap.log 2>&1
+          set -ex
+          export HOME=/root
+          dnf install -y xz tar gzip
+          curl -fsSL https://nodejs.org/dist/v24.14.0/node-v24.14.0-linux-x64.tar.xz -o /tmp/node.tar.xz
+          tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1
+          mkdir -p /opt/cloudops
+          aws s3 cp s3://${ArtifactBucket}/${AppKey} /tmp/app.tgz --region ${AWS::Region}
+          tar -xzf /tmp/app.tgz -C /opt/cloudops
+          cd /opt/cloudops
+          npm ci --omit=dev
+          id cloudops || useradd -r -s /sbin/nologin cloudops
+          chown -R cloudops /opt/cloudops
+          for unit in api worker; do
+            script=server/index.js
+            [ "$unit" = worker ] && script=server/worker.js
+            cat > /etc/systemd/system/cloudops-$unit.service <<UNIT
+          [Unit]
+          Description=CloudOps $unit
+          After=network-online.target
+          [Service]
+          User=cloudops
+          WorkingDirectory=/opt/cloudops
+          ExecStart=/usr/local/bin/node $script
+          Restart=always
+          RestartSec=20
+          Environment=NODE_ENV=production
+          Environment=HOST=0.0.0.0
+          Environment=PORT=4000
+          Environment=TRUST_PROXY=1
+          Environment=ALLOW_INSECURE_HTTP=true
+          Environment=AWS_REGION=${AWS::Region}
+          Environment=SSM_PARAMETER_PATH=/cloudops/prod/
+          Environment=DB_SSL=true
+          Environment=DB_CA_FILE=/opt/cloudops/certs/global-bundle.pem
+          [Install]
+          WantedBy=multi-user.target
+          UNIT
+          done
+          systemctl daemon-reload
+          systemctl enable --now cloudops-api cloudops-worker
+
+  # ------------------------------------------------- Alarms and dashboard
+  LambdaErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: cloudops-lambda-errors
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions: [{ Name: FunctionName, Value: !Ref Processor }]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
+  DlqAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: cloudops-dlq-not-empty
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions: [{ Name: QueueName, Value: !GetAtt IncidentDlq.QueueName }]
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
+  UnhealthyHostAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: cloudops-alb-unhealthy-hosts
+      Namespace: AWS/ApplicationELB
+      MetricName: UnHealthyHostCount
+      Dimensions:
+        - { Name: TargetGroup, Value: !GetAtt AppTargets.TargetGroupFullName }
+        - { Name: LoadBalancer, Value: !GetAtt Alb.LoadBalancerFullName }
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 3
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
+  Dashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: cloudops
+      DashboardBody: !Sub |
+        {"widgets":[
+          {"type":"metric","x":0,"y":0,"width":12,"height":6,"properties":{"title":"ALB requests","region":"${AWS::Region}","stat":"Sum","period":60,"metrics":[["AWS/ApplicationELB","RequestCount","LoadBalancer","${Alb.LoadBalancerFullName}"]]}},
+          {"type":"metric","x":12,"y":0,"width":12,"height":6,"properties":{"title":"EC2 CPU","region":"${AWS::Region}","stat":"Average","period":60,"metrics":[["AWS/EC2","CPUUtilization","InstanceId","${AppServer}"]]}},
+          {"type":"metric","x":0,"y":6,"width":12,"height":6,"properties":{"title":"Incident queue","region":"${AWS::Region}","stat":"Maximum","period":60,"metrics":[["AWS/SQS","ApproximateNumberOfMessagesVisible","QueueName","${IncidentQueue.QueueName}"],["AWS/SQS","ApproximateNumberOfMessagesVisible","QueueName","${IncidentDlq.QueueName}"]]}},
+          {"type":"metric","x":12,"y":6,"width":12,"height":6,"properties":{"title":"Lambda","region":"${AWS::Region}","stat":"Sum","period":60,"metrics":[["AWS/Lambda","Invocations","FunctionName","${Processor}"],["AWS/Lambda","Errors","FunctionName","${Processor}"]]}},
+          {"type":"metric","x":0,"y":12,"width":12,"height":6,"properties":{"title":"RDS CPU","region":"${AWS::Region}","stat":"Average","period":60,"metrics":[["AWS/RDS","CPUUtilization","DBInstanceIdentifier","${Database}"]]}}
+        ]}
+
+  # ----------------------------------------------------------------- Budgets
+  Budget:
+    Type: AWS::Budgets::Budget
+    Properties:
+      Budget:
+        BudgetName: cloudops-monthly
+        BudgetType: COST
+        TimeUnit: MONTHLY
+        BudgetLimit: { Amount: !Ref BudgetUsd, Unit: USD }
+      NotificationsWithSubscribers:
+        - Notification: { NotificationType: ACTUAL, ComparisonOperator: GREATER_THAN, Threshold: 50, ThresholdType: PERCENTAGE }
+          Subscribers: [{ SubscriptionType: EMAIL, Address: !Ref AlertEmail }]
+        - Notification: { NotificationType: ACTUAL, ComparisonOperator: GREATER_THAN, Threshold: 80, ThresholdType: PERCENTAGE }
+          Subscribers: [{ SubscriptionType: EMAIL, Address: !Ref AlertEmail }]
+        - Notification: { NotificationType: FORECASTED, ComparisonOperator: GREATER_THAN, Threshold: 100, ThresholdType: PERCENTAGE }
+          Subscribers: [{ SubscriptionType: EMAIL, Address: !Ref AlertEmail }]
+
+Outputs:
+  AppUrl:
+    Value: !Sub http://${Alb.DNSName}
+  ShopUrl:
+    Value: !Sub http://${Alb.DNSName}:8080
+  DbHost:
+    Value: !GetAtt Database.Endpoint.Address
+  InstanceId:
+    Value: !Ref AppServer
+  LogBucketName:
+    Value: !Ref LogBucket
+  QueueUrl:
+    Value: !Ref IncidentQueue

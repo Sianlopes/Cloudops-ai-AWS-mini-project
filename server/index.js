@@ -21,7 +21,8 @@ import { validateEndpoint } from "./network.js";
 import { enqueue, iso } from "./domain.js";
 import { integrationStatus, loadParameters } from "./integrations.js";
 import { workspace } from "./workspace.js";
-import { startWorker } from "./worker.js";
+import { archiveNow, startWorker } from "./worker.js";
+import { serviceInsights } from "./insights.js";
 function fail(message, status = 400) {
   throw Object.assign(Error(message), { status });
 }
@@ -40,6 +41,9 @@ export function createApp(
   { production = process.env.NODE_ENV === "production" } = {},
 ) {
   const app = express();
+  // Demo deployments without a domain/certificate run over plain HTTP.
+  const insecureHttp = process.env.ALLOW_INSECURE_HTTP === "true";
+  const secureCookies = production && !insecureHttp;
   app.disable("x-powered-by");
   if (process.env.TRUST_PROXY === "1") app.set("trust proxy", 1);
   app.use(
@@ -57,7 +61,7 @@ export function createApp(
               fontSrc: ["'self'", "https://fonts.gstatic.com"],
               imgSrc: ["'self'", "data:"],
               connectSrc: ["'self'"],
-              upgradeInsecureRequests: [],
+              upgradeInsecureRequests: insecureHttp ? null : [],
             },
           }
         : false,
@@ -114,7 +118,7 @@ export function createApp(
     const c = credentials(req.body);
     const user = await createAdmin(db, c.email, c.password);
     const session = await newSession(db, user.id);
-    setSessionCookie(res, session.token, production);
+    setSessionCookie(res, session.token, secureCookies);
     res.status(201).json({ user, csrfToken: session.csrf });
   });
   app.post("/api/auth/login", authLimit, async (req, res) => {
@@ -129,7 +133,7 @@ export function createApp(
     )
       fail("Invalid email or password.", 401);
     const session = await newSession(db, user.id);
-    setSessionCookie(res, session.token, production);
+    setSessionCookie(res, session.token, secureCookies);
     await db.tx((tx) => audit(tx, user.id, "login", "session"));
     res.json({
       user: { id: user.id, email: user.email },
@@ -188,6 +192,22 @@ export function createApp(
         (typeof e.traceId !== "string" || e.traceId.length > 128)
       )
         fail("Invalid trace ID.");
+      // Which endpoint a request event belongs to: explicit fields, or parsed from an
+      // older-style message such as "GET /api/products".
+      let method = null,
+        route = null;
+      if (e.type === "request") {
+        const parsed = /^([A-Za-z]{3,10})\s+(\/[^\s?]*)/.exec(e.message);
+        const m = (typeof e.method === "string" ? e.method : parsed?.[1] || "")
+          .toUpperCase()
+          .trim();
+        const r = (typeof e.route === "string" ? e.route : parsed?.[2] || "")
+          .split("?")[0]
+          .trim()
+          .slice(0, 200);
+        if (/^[A-Z]{3,10}$/.test(m)) method = m;
+        if (r) route = r;
+      }
       const signal = {
         id: `event-${hash(s.id + ":" + e.id)}`,
         kind: "event",
@@ -201,6 +221,8 @@ export function createApp(
           value: e.type === "cpu" ? e.value : null,
           statusCode: e.type === "request" ? e.statusCode : null,
           duration: e.type === "request" ? e.duration : null,
+          method,
+          route,
           traceId: e.traceId || "",
         },
       };
@@ -254,7 +276,7 @@ export function createApp(
     res.clearCookie("cloudops_session", {
       httpOnly: true,
       sameSite: "strict",
-      secure: production,
+      secure: secureCookies,
       path: "/",
     });
     res.json({ message: "Signed out." });
@@ -339,6 +361,24 @@ export function createApp(
     res.json({
       message: enabled ? "Monitoring resumed." : "Monitoring paused.",
     });
+  });
+  app.delete("/api/services/:id", async (req, res) => {
+    await db.tx(async (tx) => {
+      const result = await tx.query("DELETE FROM services WHERE id=$1", [
+        req.params.id,
+      ]);
+      if (!result.rowCount) fail("Service not found.", 404);
+      await audit(tx, req.user.id, "service.delete", req.params.id);
+    });
+    res.json({ message: "Service deleted." });
+  });
+  app.get("/api/services/:id/insights", async (req, res) => {
+    const insights = await serviceInsights(db, req.params.id, {
+      range: String(req.query.range || "24h"),
+      endpoint: String(req.query.endpoint || "").slice(0, 250),
+    });
+    if (!insights) fail("Service not found.", 404);
+    res.json(insights);
   });
   app.post("/api/services/:id/check", async (req, res) => {
     await db.tx(async (tx) => {
@@ -433,6 +473,19 @@ export function createApp(
     });
     res.json({ message: "Monitoring rule saved." });
   });
+  app.post("/api/archive", async (req, res) => {
+    let result;
+    try {
+      result = await archiveNow(db);
+    } catch (e) {
+      fail(e.message, 400);
+    }
+    if (!result.count) fail("There are no events in the last 24 hours to archive.", 400);
+    res.json({
+      message: `Queued ${result.count} events for S3: ${result.prefix}/`,
+      ...result,
+    });
+  });
   app.put("/api/settings", async (req, res) => {
     const { workspace: label, email, retention } = req.body;
     if (
@@ -502,7 +555,8 @@ if (
   const production = process.env.NODE_ENV === "production";
   if (
     production &&
-    (!process.env.APP_ORIGIN?.startsWith("https://") ||
+    ((process.env.ALLOW_INSECURE_HTTP !== "true" &&
+      !process.env.APP_ORIGIN?.startsWith("https://")) ||
       process.env.EMBEDDED_WORKER === "true")
   )
     throw Error("Production requires HTTPS APP_ORIGIN and a separate worker.");

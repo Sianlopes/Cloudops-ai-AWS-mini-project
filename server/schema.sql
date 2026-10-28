@@ -13,7 +13,7 @@ CREATE TABLE IF NOT EXISTS services (
 );
 CREATE TABLE IF NOT EXISTS checks (id TEXT PRIMARY KEY, service_id TEXT NOT NULL REFERENCES services(id) ON DELETE CASCADE, at TEXT NOT NULL, success INTEGER NOT NULL, status_code INTEGER, latency REAL NOT NULL, error TEXT, cpu REAL);
 CREATE INDEX IF NOT EXISTS checks_service_time ON checks(service_id,at);
-CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY, service_id TEXT NOT NULL REFERENCES services(id) ON DELETE CASCADE, type TEXT NOT NULL, subject TEXT NOT NULL DEFAULT '', at TEXT NOT NULL, value REAL, duration REAL, status_code INTEGER, level TEXT NOT NULL, message TEXT NOT NULL, trace_id TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY, service_id TEXT NOT NULL REFERENCES services(id) ON DELETE CASCADE, type TEXT NOT NULL, subject TEXT NOT NULL DEFAULT '', at TEXT NOT NULL, value REAL, duration REAL, status_code INTEGER, level TEXT NOT NULL, message TEXT NOT NULL, trace_id TEXT NOT NULL, method TEXT, route TEXT);
 CREATE INDEX IF NOT EXISTS events_service_time ON events(service_id,at);
 CREATE TABLE IF NOT EXISTS incidents (id TEXT PRIMARY KEY, service_id TEXT NOT NULL REFERENCES services(id) ON DELETE CASCADE, rule_id TEXT NOT NULL REFERENCES rules(id), scope TEXT NOT NULL DEFAULT '', title TEXT NOT NULL, severity TEXT NOT NULL, status TEXT NOT NULL, detected_at TEXT NOT NULL, updated_at TEXT NOT NULL, evidence TEXT NOT NULL);
 CREATE UNIQUE INDEX IF NOT EXISTS one_active_incident ON incidents(service_id,rule_id,scope) WHERE status <> 'resolved';

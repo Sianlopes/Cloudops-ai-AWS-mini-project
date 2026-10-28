@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Acme Shop · presenter controls</title>
+    <link rel="stylesheet" href="shop.css" />
+    <style>
+      main { max-width: 760px; display: grid; gap: 16px; }
+      .panel { padding: 18px 20px; }
+      .panel h2 { font-size: 15px; margin: 0 0 4px; }
+      .panel > .hint { display: block; margin-bottom: 14px; }
+      .status { display: flex; align-items: center; gap: 8px; font-weight: 600; margin-bottom: 4px; }
+      form { display: grid; gap: 8px; }
+      .row { display: flex; gap: 8px; flex-wrap: wrap; }
+      .options { display: grid; gap: 8px; }
+      .option {
+        text-align: left;
+        border: 1px solid var(--border);
+        background: var(--card);
+        border-radius: 8px;
+        padding: 12px 14px;
+        cursor: pointer;
+        display: grid;
+        gap: 2px;
+      }
+      .option:hover { background: #fafafa; }
+      .option.active { border-color: var(--text); box-shadow: inset 0 0 0 1px var(--text); }
+      .option b { display: flex; align-items: center; gap: 8px; }
+      .option .detect { color: var(--muted); font-size: 12px; }
+      .msg { font-size: 13px; min-height: 18px; }
+      .sim { display: flex; align-items: center; gap: 14px; border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; }
+      .sim.running { border-color: var(--success); background: #f0fdf4; }
+      .sim .grow { flex: 1; display: grid; gap: 2px; }
+      .sim b { display: flex; align-items: center; gap: 8px; }
+      .sim .stats { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+      .btn.stop { border-color: var(--danger); color: var(--danger); }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div class="bar">
+        <span class="brand">Acme Shop · presenter controls</span>
+        <div class="spacer"></div>
+        <a class="btn" href="./" target="_blank">Open the shop</a>
+      </div>
+    </header>
+    <main>
+      <section class="panel">
+        <h2>1. Connect to CloudOps</h2>
+        <span class="hint">In CloudOps: Services → open this shop's service → Ingestion token → Copy token. Then paste it here.</span>
+        <div class="status"><span class="dot" id="cdot"></span><span id="clabel">…</span></div>
+        <p class="hint" id="cinfo" style="margin: 0 0 12px"></p>
+        <form id="connectForm">
+          <input class="field" name="token" type="password" placeholder="Paste the ingestion token" autocomplete="off" required />
+          <input class="field" name="url" id="url" placeholder="CloudOps URL" />
+          <div class="row">
+            <button class="btn primary">Connect</button>
+            <button class="btn" type="button" id="disconnect">Disconnect</button>
+          </div>
+        </form>
+        <div class="msg" id="cmsg"></div>
+      </section>
+
+      <section class="panel">
+        <h2>2. Shop condition</h2>
+        <span class="hint">Choose what is wrong with the shop. Each option is real behaviour of the shop's API.</span>
+        <div class="options" id="options"></div>
+      </section>
+
+      <section class="panel">
+        <h2>3. Simulate real usage</h2>
+        <span class="hint">Start these to generate real HTTP requests against the shop. When connected, the shop reports them to CloudOps. Each runs until you stop it.</span>
+        <div class="options" id="sims"></div>
+        <div class="row" style="margin-top: 12px">
+          <button class="btn" id="stopAll">Stop everything</button>
+          <span class="msg" id="smsg" style="align-self: center"></span>
+        </div>
+      </section>
+    </main>
+    <script src="control.js"></script>
+  </body>
+</html>

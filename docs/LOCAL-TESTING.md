@@ -1,88 +1,53 @@
-# Real monitoring on your computer
+# Trying CloudOps on your computer
 
-## Start the application
+Requires Node.js 24. Open two terminals in the project folder (on Windows PowerShell use `npm.cmd` if script execution is blocked).
 
-Requires Node.js 24. In this folder:
-
-```powershell
-npm.cmd ci
-npm.cmd run dev
+```sh
+npm ci
+npm run dev          # terminal 1: dashboard on http://127.0.0.1:5173
+npm run demo-shop    # terminal 2: demo shop on http://127.0.0.1:4100
 ```
 
-Open http://127.0.0.1:5173. Create your administrator using a unique password of at least 12 characters. There is no preset account. The local database is `data/cloudops.sqlite`.
+Create the administrator account on first visit (a password of at least 12 characters; there is no preset account). Locally, alerts are queued and retried because no SNS topic is configured; everything else works.
 
-In another terminal:
+## 1. A health check
 
-```powershell
-npm.cmd run example
-```
+**Add service**, then enter:
 
-Register a service through **Services → Add service**:
+- Name: `Acme Shop`
+- Health-check URL: `http://127.0.0.1:4100/health` (the loopback demo target is allowed in development only)
+- Interval: 15 seconds, expected status 200
 
-- Name: Test API
-- Endpoint: `http://127.0.0.1:4100/health`
-- Interval: 15 seconds
-- Timeout: 5000 ms
-- Expected HTTP status: 200
+Within seconds the service turns healthy and the Services page shows its check history.
 
-`npm run dev` allows exactly this loopback host and port for the controlled example. The exception is disabled in production. Other private/reserved targets remain blocked.
+## 2. A real outage
 
-## Create an actual outage
+Open `http://127.0.0.1:4100/control`, choose **Shop down**, and after three failed checks a **Service availability** incident appears. Choose **Healthy** and it resolves by itself after two healthy checks. **Slow** triggers the response-latency rule.
 
-```powershell
-Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:4100/scenario' -ContentType 'application/json' -Body '{"scenario":"outage"}'
-```
+## 3. Connect the application
 
-The example endpoint now really returns HTTP 503. After three failed checks, an availability incident appears. Inspect its evidence and acknowledge it. Repeated failures update the existing incident.
+1. Open the service in CloudOps and click **Connect your app**. Copy the token.
+2. Paste it into the **Connect to CloudOps** box on the shop's control page and click Connect.
+3. Under **Simulate real usage**, start **Customer traffic**. The service page now shows real traffic and an **Endpoints** table (requests, errors, average and p95 time for each endpoint).
+4. Choose **Payments failing**: `/health` stays green, but `POST /api/orders` fails. An **API error rate** incident opens for that endpoint.
+5. Start **Password-guessing attack** to raise an **Authentication failures** incident.
 
-Restore health:
+## Rules in brief
 
-```powershell
-Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:4100/scenario' -ContentType 'application/json' -Body '{"scenario":"healthy"}'
-```
+| Rule | Trips when |
+|---|---|
+| Service availability | 3 consecutive failed health checks |
+| Response latency | slow checks 3 times in a row |
+| Unusual response latency | latency far above that service's own baseline (needs 20 earlier checks) |
+| API error rate | more than 10% 5xx for one endpoint in 5 minutes (at least 10 requests) |
+| Authentication failures | 5 failures for one account in 5 minutes |
+| CPU utilization | 5 sustained samples above the threshold |
 
-After two healthy checks, the availability incident resolves. Choose `slow` to delay responses by 1500 ms; three slow checks trigger the latency rule.
+Availability and latency incidents resolve after two healthy checks; the window-based rules resolve when their window clears.
 
-Without SNS configuration, alerts are **queued and retried**, not emailed. Settings shows this explicitly. Real endpoint monitoring and incident detection still work locally.
+## Checks
 
-## Send application events
-
-Open a service detail and click **Create ingestion token**. Copy it securely; generating another token revokes the old one. Put it in your application environment. Do not put it in frontend code or Git.
-
-An HTTP client sends:
-
-```http
-POST /api/events
-Authorization: Bearer YOUR_SERVICE_TOKEN
-Content-Type: application/json
-
-{"id":"unique-event-001","type":"request","statusCode":503,"duration":120,"level":"error","message":"Order request failed"}
-```
-
-Supported event types:
-
-| Type | Required additional fields | Rule |
-|---|---|---|
-| `request` | `statusCode`, `duration` in ms | 5xx percentage over five minutes, minimum 20 requests |
-| `auth_failure` | `subject`, a stable account identifier | Five failures for the same account over five minutes |
-| `cpu` | `value` between 0 and 100 | Five sustained samples, spaced roughly a minute apart |
-| `log` | No additional fields | Stored and searchable |
-
-All events require `id` (8–128 letters, digits, underscores, or dashes), `type`, and `message`. `level` defaults to `info`; `traceId` is optional. Reuse the event ID when retrying a delivery: it prevents double counting. IDs are scoped to their service. Authentication subjects are stored as SHA-256 fingerprints, not cleartext; avoid sensitive information in log messages.
-
-Dashboard charts use **actual** collected values. CPU and request charts stay empty until the relevant events arrive. Availability is successful scheduled probes divided by all recorded probes since registration; it is not a contractual uptime measurement.
-
-## Statistical anomaly detection
-
-The anomaly rule needs at least 20 baseline successful checks and three recent successful checks. It compares recent latency with the baseline mean and configurable standard deviations, plus floors of 1.5× the mean and mean+50 ms to avoid noisy tiny changes. Three unusual responses create an incident; two responses within the baseline resolve it. This is statistical detection, not a trained model or a proven root-cause diagnosis.
-
-## Verify persistence and protection
-
-- Restart the app: your services, incidents, rules, and administrator persist.
-- Sign out: private API routes return 401.
-- Try an expired or invalid ingestion token: ingestion returns 401.
-- Try write requests without the CSRF header: authenticated writes return 403.
-- Register a metadata/private endpoint: its check is blocked; no network request is made to it.
-- Pause a service: its scheduled checks stop; resume to start again.
-
-Run `npm.cmd test` for automated checks. For PostgreSQL testing, see the Docker Compose instructions in the AWS deployment guide. The test suite uses SQLite by default; RDS and actual AWS delivery must be tested in your deployment.
+- Restart the app: services, incidents, rules and the administrator persist.
+- Signed out, private API routes return 401. Writes without the CSRF header return 403.
+- Registering a private or metadata address is blocked; no request is made to it.
+- `npm test` runs the automated suite on SQLite. PostgreSQL and real AWS delivery are verified on a deployment.

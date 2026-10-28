@@ -1,5 +1,5 @@
 {
-  "name": "cloudops-ai",
+  "name": "cloudops",
   "version": "1.0.0",
   "private": true,
   "type": "module",
@@ -13,7 +13,8 @@
     "worker": "node --env-file-if-exists=.env server/worker.js",
     "migrate": "node --env-file-if-exists=.env scripts/migrate.mjs",
     "admin:reset": "node --env-file-if-exists=.env scripts/reset-password.mjs",
-    "example": "node --env-file-if-exists=.env examples/target.js",
+    "demo-shop": "node examples/acme-shop/server.js",
+    "sync:shop-client": "node scripts/sync-shop-client.mjs",
     "package:lambda": "node scripts/package-lambda.mjs",
     "test": "node --test server/*.test.js"
   },
@@ -31,13 +32,23 @@
     "pg": "^8.13.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "recharts": "^3.0.0"
+    "recharts": "^3.8.0"
   },
   "devDependencies": {
+    "@fontsource-variable/geist": "^5.3.0",
+    "@fontsource-variable/geist-mono": "^5.3.0",
+    "@tailwindcss/vite": "^4.3.3",
     "@vitejs/plugin-react": "^4.4.0",
+    "class-variance-authority": "^0.7.1",
+    "cn": "^0.5.0",
     "concurrently": "^9.1.0",
     "esbuild": "^0.28.2",
-    "prettier": "^3.9.9",
+    "next-themes": "^0.4.6",
+    "radix-ui": "^1.8.1",
+    "shadcn": "^4.23.0",
+    "sonner": "^2.0.8",
+    "tailwindcss": "^4.3.3",
+    "tw-animate-css": "^1.4.0",
     "vite": "^7.0.0"
   }
 }
